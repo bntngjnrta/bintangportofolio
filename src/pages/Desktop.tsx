@@ -1,0 +1,480 @@
+import React from "react";
+import { apps } from "~/configs";
+import { minMarginY, isFullScreen, enterFullScreen, exitFullScreen } from "~/utils";
+import type { MacActions } from "~/types";
+import DynamicIsland from "~/components/DynamicIsland";
+import NotificationCenter from "~/components/NotificationCenter";
+import AboutThisMacModal from "~/components/AboutThisMacModal";
+import CalendarWidget from "~/components/widgets/CalendarWidget";
+import WeatherWidget from "~/components/widgets/WeatherWidget";
+import ContextMenu from "~/components/menus/ContextMenu";
+import { AnimatePresence, motion } from "framer-motion";
+import { useAudioContext } from "~/context/AudioContext";
+
+interface DesktopState {
+  showApps: { [key: string]: boolean };
+  appsZ: { [key: string]: number };
+  maxApps: { [key: string]: boolean };
+  minApps: { [key: string]: boolean };
+  maxZ: number;
+  showLaunchpad: boolean;
+  currentTitle: string;
+  hideDockAndTopbar: boolean;
+  spotlight: boolean;
+  showNotificationCenter: boolean;
+}
+
+// Build the initial state map from apps config — includes ALL apps
+function buildInitialState(): Pick<DesktopState, "showApps" | "appsZ" | "maxApps" | "minApps"> {
+  const showApps: { [key: string]: boolean } = {};
+  const appsZ: { [key: string]: number } = {};
+  const maxApps: { [key: string]: boolean } = {};
+  const minApps: { [key: string]: boolean } = {};
+  apps.forEach((app) => {
+    showApps[app.id] = !!app.show;
+    appsZ[app.id] = 2;
+    maxApps[app.id] = false;
+    minApps[app.id] = false;
+  });
+  return { showApps, appsZ, maxApps, minApps };
+}
+
+const INITIAL = buildInitialState();
+
+export default function Desktop(props: MacActions) {
+  const [mounted, setMounted] = useState(true);
+
+  const [state, setState] = useState<DesktopState>({
+    ...INITIAL,
+    maxZ: 2,
+    showLaunchpad: false,
+    currentTitle: "About Me",
+    hideDockAndTopbar: false,
+    spotlight: false,
+    showNotificationCenter: false,
+  });
+
+  const [spotlightBtnRef, setSpotlightBtnRef] =
+    useState<React.RefObject<HTMLDivElement> | null>(null);
+  const [showAboutMac, setShowAboutMac] = useState(false);
+  const [showWelcomeToast, setShowWelcomeToast] = useState(true);
+  const { controls } = useAudioContext();
+
+  const { dark, brightness, getWallpaper } = useStore((s) => ({
+    dark: s.dark,
+    brightness: s.brightness,
+    getWallpaper: s.getWallpaper,
+  }));
+
+  const activeWallpaper = getWallpaper();
+
+  // Play audio once upon first entering desktop
+  useEffect(() => {
+    let played = false;
+    const tryPlay = () => {
+      if (played) return;
+      const res = controls.play();
+      if (res && typeof (res as Promise<void>).then === "function") {
+        (res as Promise<void>)
+          .then(() => {
+            played = true;
+            cleanup();
+          })
+          .catch(() => {
+            // Autoplay blocked until user interaction
+          });
+      } else {
+        played = true;
+        cleanup();
+      }
+    };
+
+    const handleInteraction = () => {
+      tryPlay();
+    };
+
+    const cleanup = () => {
+      window.removeEventListener("click", handleInteraction);
+      window.removeEventListener("keydown", handleInteraction);
+      window.removeEventListener("touchstart", handleInteraction);
+    };
+
+    tryPlay();
+    window.addEventListener("click", handleInteraction, { once: true });
+    window.addEventListener("keydown", handleInteraction, { once: true });
+    window.addEventListener("touchstart", handleInteraction, { once: true });
+
+    return cleanup;
+  }, []);
+
+  // Listen for cross-component events and global keyboard shortcuts
+  useEffect(() => {
+    const handleOpenLaunchpad = () => toggleLaunchpad(true);
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+
+      // Spotlight: Cmd/Ctrl + Space
+      if (isCmdOrCtrl && e.code === 'Space') {
+        e.preventDefault();
+        toggleSpotlight();
+      }
+
+      // Full screen: Cmd/Ctrl + F OR F11
+      if ((isCmdOrCtrl && e.key.toLowerCase() === 'f') || e.key === 'F11') {
+        e.preventDefault();
+        if (isFullScreen()) {
+          exitFullScreen();
+          useStore.getState().toggleFullScreen(false);
+        } else {
+          enterFullScreen();
+          useStore.getState().toggleFullScreen(true);
+        }
+      }
+
+      // Brightness Down: Cmd/Ctrl + Down Arrow OR F1
+      if ((isCmdOrCtrl && e.key === 'ArrowDown') || e.key === 'F1') {
+        e.preventDefault();
+        const currentBrightness = useStore.getState().brightness as number;
+        useStore.getState().setBrightness(Math.max(currentBrightness - 10, 1));
+      }
+
+      // Brightness Up: Cmd/Ctrl + Up Arrow OR F2
+      if ((isCmdOrCtrl && e.key === 'ArrowUp') || e.key === 'F2') {
+        e.preventDefault();
+        const currentBrightness = useStore.getState().brightness as number;
+        useStore.getState().setBrightness(Math.min(currentBrightness + 10, 100));
+      }
+    };
+
+    window.addEventListener("siri:openLaunchpad", handleOpenLaunchpad);
+    window.addEventListener("keydown", handleKeyDown);
+    
+    return () => {
+      window.removeEventListener("siri:openLaunchpad", handleOpenLaunchpad);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [state]);  // re-bind when state updates so closures are fresh
+
+  const toggleLaunchpad = (target: boolean): void => {
+    setState((prev) => ({ ...prev, showLaunchpad: target }));
+  };
+
+  const toggleSpotlight = (): void => {
+    setState((prev) => ({ ...prev, spotlight: !prev.spotlight }));
+  };
+
+  const toggleNotificationCenter = (): void => {
+    setState((prev) => ({ ...prev, showNotificationCenter: !prev.showNotificationCenter }));
+  };
+
+  const setWindowPosition = (id: string): void => {
+    const r = document.querySelector(`#window-${id}`) as HTMLElement;
+    if (!r) return;
+    const rect = r.getBoundingClientRect();
+    r.style.setProperty(
+      "--window-transform-x",
+      (window.innerWidth + rect.x).toFixed(1) + "px"
+    );
+    r.style.setProperty(
+      "--window-transform-y",
+      (rect.y - minMarginY).toFixed(1) + "px"
+    );
+  };
+
+  const setAppMax = (id: string, target?: boolean): void => {
+    setState((prev) => {
+      const maxApps = { ...prev.maxApps };
+      if (target === undefined) target = !maxApps[id];
+      maxApps[id] = target!;
+      return { ...prev, maxApps, hideDockAndTopbar: target! };
+    });
+  };
+
+  const minimizeApp = (id: string): void => {
+    setWindowPosition(id);
+    const dock = document.querySelector(`#dock-${id}`) as HTMLElement;
+    const win = document.querySelector(`#window-${id}`) as HTMLElement;
+    if (!dock || !win) return;
+    const dockRect = dock.getBoundingClientRect();
+    const posY = window.innerHeight - win.offsetHeight / 2 - minMarginY;
+    const posX = window.innerWidth + dockRect.x - win.offsetWidth / 2 + 25;
+    win.style.transform = `translate(${posX}px, ${posY}px) scale(0.2)`;
+    win.style.transition = "ease-out 0.3s";
+    setState((prev) => ({ ...prev, minApps: { ...prev.minApps, [id]: true } }));
+  };
+
+  const closeApp = (id: string): void => {
+    setState((prev) => ({
+      ...prev,
+      showApps: { ...prev.showApps, [id]: false },
+      maxApps: { ...prev.maxApps, [id]: false },
+      hideDockAndTopbar: false,
+    }));
+  };
+
+  const openApp = (id: string): void => {
+    const appDef = apps.find((a) => a.id === id);
+    if (!appDef) {
+      console.warn(`openApp: unknown app id "${id}"`);
+      return;
+    }
+
+    setState((prev) => {
+      const maxZ = prev.maxZ + 1;
+      const showApps = { ...prev.showApps, [id]: true };
+      const appsZ = { ...prev.appsZ, [id]: maxZ };
+
+      // Un-minimize if needed
+      const minApps = { ...prev.minApps };
+      if (minApps[id]) {
+        const win = document.querySelector(`#window-${id}`) as HTMLElement;
+        if (win) {
+          win.style.transform = `translate(${win.style.getPropertyValue("--window-transform-x")}, ${win.style.getPropertyValue("--window-transform-y")}) scale(1)`;
+          win.style.transition = "ease-in 0.3s";
+        }
+        minApps[id] = false;
+      }
+
+      return {
+        ...prev,
+        showApps,
+        appsZ,
+        maxZ,
+        minApps,
+        currentTitle: appDef.title,
+      };
+    });
+  };
+
+  const renderAppWindows = () => {
+    return apps.map((app) => {
+      if (!app.desktop) return null;
+
+      if (app.id === "siri" && state.showApps[app.id]) {
+        return (
+          <div
+            key={`desktop-app-${app.id}`}
+            className="fixed top-8 right-4 z-[1000] drop-shadow-2xl flex items-start justify-end"
+          >
+            {React.cloneElement(app.content as React.ReactElement, {
+              closeSiri: () => closeApp("siri"),
+            })}
+          </div>
+        );
+      }
+
+      if (!app.content) return null;
+
+      const windowProps = {
+        id: app.id,
+        title: app.title,
+        width: app.width,
+        height: app.height,
+        minWidth: app.minWidth,
+        minHeight: app.minHeight,
+        aspectRatio: app.aspectRatio,
+        x: app.x,
+        y: app.y,
+        z: state.appsZ[app.id] ?? 2,
+        max: state.maxApps[app.id] ?? false,
+        min: state.minApps[app.id] ?? false,
+        close: closeApp,
+        setMax: setAppMax,
+        setMin: minimizeApp,
+        focus: openApp,
+      };
+
+return (
+  <AnimatePresence key={`desktop-app-${app.id}`}>
+    {mounted && state.showApps[app.id] && (
+      <AppWindow {...windowProps}>
+        {app.content}
+      </AppWindow>
+    )}
+  </AnimatePresence>
+);
+    });
+  };
+
+  const bgStyle: any = {
+    backgroundImage: `url(${dark ? activeWallpaper.night : activeWallpaper.day})`,
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+    filter: `brightness(${(brightness as number) * 0.7 + 50}%)`
+  };
+  bgStyle["trans" + "ition"] = "filter 0.3s ea" + "se";
+
+  const [contextMenu, setContextMenu] = useState({ show: false, x: 0, y: 0 });
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ show: true, x: e.clientX, y: e.clientY });
+  };
+
+  return (
+    <div
+      className="size-full overflow-hidden bg-center bg-cover"
+      style={bgStyle}
+      onContextMenu={handleContextMenu}
+    >
+      {/* Top Menu Bar */}
+      <TopBar
+        title={state.currentTitle}
+        setLogin={props.setLogin}
+        shutMac={props.shutMac}
+        sleepMac={props.sleepMac}
+        restartMac={props.restartMac}
+        toggleSpotlight={toggleSpotlight}
+        hide={state.hideDockAndTopbar}
+        setSpotlightBtnRef={setSpotlightBtnRef}
+        openApp={openApp}
+        toggleNotificationCenter={toggleNotificationCenter}
+        showNotificationCenter={state.showNotificationCenter}
+        openAboutMac={() => setShowAboutMac(true)}
+      />
+
+      {/* Dynamic Island */}
+      <DynamicIsland currentApp={state.currentTitle} />
+
+      {/* Desktop-pinned widgets — top-left, visible on desktop background */}
+      <div
+        className="hidden md:flex"
+        style={{
+          position: "fixed",
+          top: 48,
+          left: 16,
+          zIndex: 1,
+          flexDirection: "column",
+          gap: 12,
+          pointerEvents: "none",
+        }}
+      >
+        <div style={{ pointerEvents: "auto" }}>
+          <CalendarWidget compact={false} />
+        </div>
+        <div style={{ pointerEvents: "auto" }}>
+          <WeatherWidget compact={false} />
+        </div>
+      </div>
+
+      {/* Desktop Icons - top-right */}
+      <div
+        style={{
+          position: "fixed",
+          top: 48,
+          right: 24,
+          zIndex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 24,
+        }}
+      >
+      </div>
+
+      {/* Desktop App Windows */}
+      <div className="window-bound absolute z-20 pointer-events-none" style={{ top: minMarginY }}>
+        {renderAppWindows()}
+      </div>
+
+      {/* About This Mac modal */}
+      <AboutThisMacModal show={showAboutMac} onClose={() => setShowAboutMac(false)} isDark={dark} />
+
+      {/* Spotlight */}
+      {state.spotlight && (
+        <Spotlight
+          openApp={openApp}
+          toggleLaunchpad={toggleLaunchpad}
+          toggleSpotlight={toggleSpotlight}
+          btnRef={spotlightBtnRef as React.RefObject<HTMLDivElement>}
+        />
+      )}
+
+      {/* Launchpad */}
+      <Launchpad show={state.showLaunchpad} toggleLaunchpad={toggleLaunchpad} />
+
+      {/* Notification Center */}
+      <NotificationCenter
+        show={state.showNotificationCenter}
+        onClose={toggleNotificationCenter}
+      />
+
+      {/* Welcome Notification Toast */}
+      <AnimatePresence>
+        {showWelcomeToast && (
+          <motion.div
+            initial={{ opacity: 0, x: 100, y: 0, scale: 0.92 }}
+            animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 100, scale: 0.92 }}
+            transition={{ type: "spring", stiffness: 360, damping: 28, delay: 0.5 }}
+            className="fixed top-12 right-4 z-[999] w-[340px] max-w-[calc(100vw-32px)] cursor-pointer select-none"
+            onClick={() => {
+              openApp("bear");
+              setShowWelcomeToast(false);
+            }}
+          >
+            <div
+              className="p-3.5 rounded-2xl border transition-all duration-200 shadow-2xl hover:scale-[1.02]"
+              style={{
+                background: dark ? "rgba(30, 30, 32, 0.85)" : "rgba(255, 255, 255, 0.88)",
+                backdropFilter: "blur(30px)",
+                WebkitBackdropFilter: "blur(30px)",
+                borderColor: dark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.1)",
+                boxShadow: dark ? "0 12px 36px rgba(0,0,0,0.6)" : "0 12px 36px rgba(0,0,0,0.18)",
+              }}
+            >
+              <div className="flex items-start gap-3">
+                <img
+                  src="img/icons/bear.png"
+                  alt="About Me"
+                  className="w-10 h-10 rounded-xl flex-shrink-0 shadow-md"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                      Portfolio • now
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowWelcomeToast(false);
+                      }}
+                      className="text-gray-400 hover:text-gray-600 dark:hover:text-white p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                    >
+                      <span className="i-ph:x-bold text-xs block" />
+                    </button>
+                  </div>
+                  <h4 className="text-[13.5px] font-bold text-gray-900 dark:text-white mt-0.5 leading-tight">
+                    Kadek Bintang Januarta
+                  </h4>
+                  <p className="text-[12px] text-gray-600 dark:text-gray-300 mt-1 leading-snug">
+                    Pilih menu <span className="font-semibold text-blue-500 dark:text-blue-400">About Me</span> di Dock bawah untuk melihat portofolio.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Dock */}
+      <Dock
+        open={openApp}
+        showApps={state.showApps}
+        showLaunchpad={state.showLaunchpad}
+        toggleLaunchpad={toggleLaunchpad}
+        hide={state.hideDockAndTopbar}
+      />
+
+      {/* Context Menu */}
+      <ContextMenu
+        x={contextMenu.x}
+        y={contextMenu.y}
+        show={contextMenu.show}
+        onClose={() => setContextMenu({ ...contextMenu, show: false })}
+        openApp={openApp}
+      />
+    </div>
+  );
+}
