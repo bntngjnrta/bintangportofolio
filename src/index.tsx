@@ -115,7 +115,7 @@ export default function App() {
   const page = getPage();
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%", background: "transparent" }}>
+    <div style={{ position: "fixed", inset: 0, overflow: "hidden", background: "transparent", touchAction: "none" }}>
       {/* Persistent wallpaper — always visible, never absent during transitions */}
       <div
         style={{
