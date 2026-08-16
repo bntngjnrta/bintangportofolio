@@ -1,707 +1,1 @@
-import { useState, useRef, useEffect } from "react";
-
-interface Note {
-  id: string;
-  title: string;
-  body: string;
-  date: string;
-  dateISO?: string;
-  pinned?: boolean;
-  color?: string;
-}
-
-const todayISO = new Date().toISOString().slice(0, 10);
-
-const INITIAL_NOTES: Note[] = [
-  {
-    id: "1",
-    title: "👋 Welcome to Notes!",
-    body: "Hi! Welcome to the Notes app.\n\nHere's what you can do:\n• Create a new note with the [+] button or pencil icon\n• Click any note to select, then edit, download, or delete it\n• Your notes are saved automatically — they'll still be here after you refresh\n\nHappy noting! 📝",
-    date: "Today",
-    dateISO: todayISO,
-    pinned: true,
-    color: "#FFCC00",
-  },
-];
-
-const DATE_BUCKET_ORDER = [
-  "Previous 7 Days",
-  "2025",
-  "2024",
-  "2023",
-  "2022",
-  "2021",
-  "Older",
-];
-
-function dateBucket(note: Note): string {
-  const iso = note.dateISO;
-  if (!iso) {
-    const d = note.date.toLowerCase();
-    if (
-      d === "today" ||
-      d === "now" ||
-      d === "yesterday" ||
-      [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-      ].includes(d)
-    )
-      return "Previous 7 Days";
-    return "Older";
-  }
-  const diffDays =
-    (new Date().getTime() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24);
-  if (diffDays <= 7) return "Previous 7 Days";
-  return iso.slice(0, 4);
-}
-
-function groupNotes(notes: Note[]): { bucket: string; notes: Note[] }[] {
-  const map: Record<string, Note[]> = {};
-  for (const n of notes) {
-    const b = dateBucket(n);
-    if (!map[b]) map[b] = [];
-    map[b].push(n);
-  }
-  return DATE_BUCKET_ORDER.filter((b) => map[b]?.length).map((b) => ({
-    bucket: b,
-    notes: map[b],
-  }));
-}
-
-function downloadNote(note: Note) {
-  const content = `${note.title}\n${"=".repeat(note.title.length)}\n\n${note.body}`;
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${note.title.replace(/[^a-z0-9\s_-]/gi, "").trim() || "note"}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-const LS_NOTES = "notes-app-data";
-const LS_SELECTED = "notes-app-selected";
-
-function loadNotes(): Note[] {
-  try {
-    const saved = localStorage.getItem(LS_NOTES);
-    if (saved) return JSON.parse(saved) as Note[];
-  } catch {}
-  return INITIAL_NOTES;
-}
-
-// ── NoteRow defined OUTSIDE Notes() to prevent remount on every render ──
-function NoteRow({
-  note,
-  selected,
-  onSelect,
-}: {
-  note: Note;
-  selected: string;
-  onSelect: (id: string) => void;
-}) {
-  const isSelected = note.id === selected;
-  return (
-    <div
-      onClick={() => onSelect(note.id)}
-      style={{
-        padding: "9px 14px",
-        borderRadius: "8px",
-        margin: "1px 6px",
-        cursor: "pointer",
-        background: isSelected ? "rgba(255,204,0,0.22)" : "transparent",
-        transition: "background 0.15s ease",
-        display: "flex",
-        gap: "8px",
-        alignItems: "flex-start",
-        userSelect: "none",
-      }}
-      onMouseEnter={(e) => {
-        if (!isSelected)
-          (e.currentTarget as HTMLElement).style.background =
-            "rgba(0,0,0,0.04)";
-      }}
-      onMouseLeave={(e) => {
-        if (!isSelected)
-          (e.currentTarget as HTMLElement).style.background = "transparent";
-      }}
-    >
-      {note.color && (
-        <div
-          style={{
-            width: 3,
-            borderRadius: 2,
-            background: note.color,
-            alignSelf: "stretch",
-            flexShrink: 0,
-          }}
-        />
-      )}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: "13px",
-            fontWeight: 600,
-            color: "#1c1c1e",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {note.title || "Untitled"}
-        </div>
-        <div style={{ display: "flex", gap: "6px", marginTop: "1px" }}>
-          <span
-            style={{
-              fontSize: "11px",
-              color: "rgba(0,0,0,0.4)",
-              flexShrink: 0,
-            }}
-          >
-            {note.date}
-          </span>
-          <span
-            style={{
-              fontSize: "11px",
-              color: "rgba(0,0,0,0.35)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {note.body.slice(0, 28) || "No additional text"}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GroupHeader({ label }: { label: string }) {
-  return (
-    <div
-      style={{
-        fontSize: "12px",
-        fontWeight: 700,
-        color: "rgba(0,0,0,0.4)",
-        padding: "8px 14px 3px",
-        letterSpacing: "0.01em",
-      }}
-    >
-      {label}
-    </div>
-  );
-}
-
-// ── Toolbar button helper ──
-function TBtn({
-  title,
-  onClick,
-  children,
-  style,
-}: {
-  title: string;
-  onClick?: () => void;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <button
-      title={title}
-      onClick={onClick}
-      style={{
-        background: "none",
-        border: "none",
-        cursor: "pointer",
-        padding: "4px 6px",
-        borderRadius: "6px",
-        opacity: 0.55,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontSize: "13px",
-        transition: "opacity 0.12s, background 0.12s",
-        ...style,
-      }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLElement).style.opacity = "1";
-        (e.currentTarget as HTMLElement).style.background = "rgba(0,0,0,0.06)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLElement).style.opacity = (
-          style?.opacity ?? 0.55
-        ).toString();
-        (e.currentTarget as HTMLElement).style.background = "none";
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function Notes() {
-  const { winWidth } = useWindowSize();
-  const isMobile = winWidth < 768;
-
-  const [notes, setNotes] = useState<Note[]>(loadNotes);
-  const [mobileView, setMobileView] = useState<"list" | "editor">("list");
-  const [selected, setSelected] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(LS_SELECTED);
-      const loaded = loadNotes();
-      if (saved && loaded.find((n) => n.id === saved)) return saved;
-      return loaded[0]?.id ?? "";
-    } catch {
-      return loadNotes()[0]?.id ?? "";
-    }
-  });
-  const [search, setSearch] = useState("");
-  const [activeSection, setActiveSection] = useState<"notes" | "shared">(
-    "notes",
-  );
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const titleRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_NOTES, JSON.stringify(notes));
-    } catch {}
-  }, [notes]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_SELECTED, selected);
-    } catch {}
-  }, [selected]);
-
-  const activeNote = notes.find((n) => n.id === selected);
-
-  const filtered = search.trim()
-    ? notes.filter(
-        (n) =>
-          n.title.toLowerCase().includes(search.toLowerCase()) ||
-          n.body.toLowerCase().includes(search.toLowerCase()),
-      )
-    : notes;
-
-  const pinned = filtered.filter((n) => n.pinned);
-  const regular = filtered.filter((n) => !n.pinned);
-  const groups = groupNotes(regular);
-
-  const updateNote = (field: "title" | "body", val: string) => {
-    setNotes((prev) =>
-      prev.map((n) => (n.id === selected ? { ...n, [field]: val } : n)),
-    );
-  };
-
-  const newNote = () => {
-    const id = Date.now().toString();
-    const note: Note = {
-      id,
-      title: "New Note",
-      body: "",
-      date: "Today",
-      dateISO: todayISO,
-    };
-    setNotes((prev) => [note, ...prev]);
-    setSelected(id);
-    if (isMobile) setMobileView("editor");
-    setTimeout(() => {
-      titleRef.current?.focus();
-      titleRef.current?.select();
-    }, 50);
-  };
-
-  const deleteNote = (id: string) => {
-    const remaining = notes.filter((n) => n.id !== id);
-    setNotes(remaining);
-    if (selected === id) {
-      setSelected(remaining[0]?.id ?? "");
-      if (isMobile) setMobileView("list");
-    }
-  };
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        height: "100%",
-        background: "rgba(250,250,248,0.99)",
-        borderRadius: "0 0 14px 14px",
-        overflow: "hidden",
-      }}
-    >
-      {/* ── Left sidebar (iCloud folders) - hidden on mobile ── */}
-      {!isMobile && (
-        <div
-          style={{
-            width: "180px",
-            flexShrink: 0,
-            borderRight: "0.5px solid rgba(0,0,0,0.1)",
-            background: "rgba(244,242,236,0.99)",
-            display: "flex",
-            flexDirection: "column",
-            paddingTop: "8px",
-          }}
-        >
-          <div
-            style={{
-              padding: "6px 12px 8px",
-              borderBottom: "0.5px solid rgba(0,0,0,0.07)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span style={{ fontSize: "13px", fontWeight: 600, color: "#1c1c1e" }}>
-              Notes
-            </span>
-          </div>
-
-          <div style={{ padding: "10px 0 4px" }}>
-            <div
-              style={{
-                fontSize: "10px",
-                fontWeight: 700,
-                color: "rgba(0,0,0,0.35)",
-                textTransform: "uppercase",
-                letterSpacing: "0.5px",
-                padding: "0 12px 4px",
-              }}
-            >
-              iCloud
-            </div>
-            {(["notes", "shared"] as const).map((sec) => (
-              <button
-                key={sec}
-                onClick={() => setActiveSection(sec)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "5px 12px",
-                  width: "calc(100% - 8px)",
-                  background:
-                    activeSection === sec
-                      ? "rgba(0,122,255,0.12)"
-                      : "transparent",
-                  border: "none",
-                  borderRadius: "6px",
-                  margin: "0 4px",
-                  cursor: "pointer",
-                }}
-              >
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
-                >
-                  <span
-                    style={{
-                      fontSize: "13px",
-                      color: sec === "notes" ? "#007AFF" : "rgba(0,0,0,0.45)",
-                    }}
-                  >
-                    {sec === "notes" ? "📁" : "👤"}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: "12px",
-                      fontWeight: activeSection === sec ? 600 : 400,
-                      color: activeSection === sec ? "#007AFF" : "#1c1c1e",
-                    }}
-                  >
-                    {sec === "notes" ? "Notes" : "Shared"}
-                  </span>
-                </div>
-                <span
-                  style={{
-                    fontSize: "11px",
-                    color: "rgba(0,0,0,0.35)",
-                    background: "rgba(0,0,0,0.07)",
-                    borderRadius: "8px",
-                    padding: "1px 6px",
-                  }}
-                >
-                  {sec === "notes" ? notes.length : 0}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          <div
-            style={{
-              padding: "8px 12px 4px",
-              borderTop: "0.5px solid rgba(0,0,0,0.06)",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "10px",
-                fontWeight: 700,
-                color: "rgba(0,0,0,0.35)",
-                textTransform: "uppercase",
-                letterSpacing: "0.5px",
-                marginBottom: "6px",
-              }}
-            >
-              Tags
-            </div>
-            <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
-              {["All Tags", "#notes"].map((tag) => (
-                <span
-                  key={tag}
-                  style={{
-                    background: "rgba(0,0,0,0.07)",
-                    borderRadius: "12px",
-                    padding: "3px 9px",
-                    fontSize: "11px",
-                    color: "#1c1c1e",
-                    cursor: "default",
-                    userSelect: "none",
-                  }}
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Note list ── */}
-      {(!isMobile || mobileView === "list") && (
-        <div
-          style={{
-            width: isMobile ? "100%" : "220px",
-            flexShrink: 0,
-            borderRight: isMobile ? "none" : "0.5px solid rgba(0,0,0,0.1)",
-            background: "rgba(248,246,240,0.99)",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          <div
-            style={{
-              padding: "8px 10px",
-              borderBottom: "0.5px solid rgba(0,0,0,0.08)",
-              display: "flex",
-              gap: "6px",
-              alignItems: "center",
-            }}
-          >
-            <div
-              style={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                gap: "5px",
-                background: "rgba(0,0,0,0.07)",
-                borderRadius: "7px",
-                padding: "4px 8px",
-              }}
-            >
-              <span style={{ fontSize: "11px", opacity: 0.5 }}>🔍</span>
-              <input
-                placeholder="Search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  outline: "none",
-                  fontSize: "12px",
-                  width: "100%",
-                  color: "#1c1c1e",
-                }}
-              />
-            </div>
-            <button
-              onClick={newNote}
-              title="New Note"
-              style={{
-                background: "rgba(255,204,0,0.3)",
-                border: "none",
-                borderRadius: "7px",
-                width: "28px",
-                height: "28px",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                fontSize: "18px",
-                lineHeight: 1,
-                color: "#886800",
-              }}
-            >
-              +
-            </button>
-          </div>
-
-          <div style={{ flex: 1, overflowY: "auto", paddingTop: "4px" }}>
-            {pinned.length > 0 && (
-              <>
-                <GroupHeader label="Pinned" />
-                {pinned.map((n) => (
-                  <NoteRow
-                    key={n.id}
-                    note={n}
-                    selected={selected}
-                    onSelect={(id) => {
-                      setSelected(id);
-                      if (isMobile) setMobileView("editor");
-                    }}
-                  />
-                ))}
-              </>
-            )}
-            {groups.map(({ bucket, notes: gNotes }) => (
-              <div key={bucket}>
-                <GroupHeader label={bucket} />
-                {gNotes.map((n) => (
-                  <NoteRow
-                    key={n.id}
-                    note={n}
-                    selected={selected}
-                    onSelect={(id) => {
-                      setSelected(id);
-                      if (isMobile) setMobileView("editor");
-                    }}
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Editor ── */}
-      {(!isMobile || mobileView === "editor") && (
-        activeNote ? (
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              width: isMobile ? "100%" : "auto",
-            }}
-          >
-            <div
-              style={{
-                padding: "6px 12px",
-                borderBottom: "0.5px solid rgba(0,0,0,0.08)",
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                background: "rgba(250,250,248,0.99)",
-              }}
-            >
-              {isMobile && (
-                <button
-                  onClick={() => setMobileView("list")}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "#007AFF",
-                    fontSize: "13px",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    padding: "2px 0",
-                  }}
-                >
-                  ← Notes
-                </button>
-              )}
-              <div style={{ flex: 1 }} />
-              <TBtn
-                title="Download as .txt"
-                onClick={() => downloadNote(activeNote)}
-                style={{
-                  opacity: 0.7,
-                  color: "#007AFF",
-                  fontWeight: 500,
-                  fontSize: "12px",
-                  padding: "4px 8px",
-                }}
-              >
-                📥 .txt
-              </TBtn>
-              <TBtn
-                title="Delete note"
-                onClick={() => deleteNote(activeNote.id)}
-                style={{ opacity: 0.4 }}
-              >
-                ❌️
-              </TBtn>
-            </div>
-
-            <div
-              style={{
-                fontSize: "11px",
-                color: "rgba(0,0,0,0.4)",
-                padding: "10px 20px 0",
-                textAlign: "center",
-              }}
-            >
-              {activeNote.dateISO ?? activeNote.date}
-            </div>
-
-            <input
-              ref={titleRef}
-              value={activeNote.title}
-              onChange={(e) => updateNote("title", e.target.value)}
-              style={{
-                border: "none",
-                outline: "none",
-                fontSize: "20px",
-                fontWeight: 700,
-                color: "#1c1c1e",
-                padding: "8px 20px 4px",
-                background: "transparent",
-                width: "100%",
-                fontFamily: "inherit",
-              }}
-            />
-
-            <textarea
-              ref={textareaRef}
-              value={activeNote.body}
-              onChange={(e) => updateNote("body", e.target.value)}
-              style={{
-                flex: 1,
-                border: "none",
-                outline: "none",
-                resize: "none",
-                fontSize: "14px",
-                lineHeight: "1.6",
-                color: "#1c1c1e",
-                padding: "0 20px 20px",
-                background: "transparent",
-                fontFamily: "inherit",
-              }}
-            />
-          </div>
-        ) : (
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "rgba(0,0,0,0.3)",
-              fontSize: "14px",
-            }}
-          >
-            Select or create a note
-          </div>
-        )
-      )}
-    </div>
-  );
-}
+import { useState, useRef, useEffect } from "react";interface Note {  id: string;  title: string;  body: string;  date: string;  dateISO?: string;  pinned?: boolean;  color?: string;}const todayISO = new Date().toISOString().slice(0, 10);const INITIAL_NOTES: Note[] = [  {    id: "1",    title: "👋 Welcome to Notes!",    body: "Hi! Welcome to the Notes app.\n\nHere's what you can do:\n• Create a new note with the [+] button or pencil icon\n• Click any note to select, then edit, download, or delete it\n• Your notes are saved automatically — they'll still be here after you refresh\n\nHappy noting! 📝",    date: "Today",    dateISO: todayISO,    pinned: true,    color: "#FFCC00",  },];const DATE_BUCKET_ORDER = [  "Previous 7 Days",  "2025",  "2024",  "2023",  "2022",  "2021",  "Older",];function dateBucket(note: Note): string {  const iso = note.dateISO;  if (!iso) {    const d = note.date.toLowerCase();    if (      d === "today" ||      d === "now" ||      d === "yesterday" ||      [        "monday",        "tuesday",        "wednesday",        "thursday",        "friday",        "saturday",        "sunday",      ].includes(d)    )      return "Previous 7 Days";    return "Older";  }  const diffDays =    (new Date().getTime() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24);  if (diffDays <= 7) return "Previous 7 Days";  return iso.slice(0, 4);}function groupNotes(notes: Note[]): { bucket: string; notes: Note[] }[] {  const map: Record<string, Note[]> = {};  for (const n of notes) {    const b = dateBucket(n);    if (!map[b]) map[b] = [];    map[b].push(n);  }  return DATE_BUCKET_ORDER.filter((b) => map[b]?.length).map((b) => ({    bucket: b,    notes: map[b],  }));}function downloadNote(note: Note) {  const content = `${note.title}\n${"=".repeat(note.title.length)}\n\n${note.body}`;  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });  const url = URL.createObjectURL(blob);  const a = document.createElement("a");  a.href = url;  a.download = `${note.title.replace(/[^a-z0-9\s_-]/gi, "").trim() || "note"}.txt`;  a.click();  URL.revokeObjectURL(url);}const LS_NOTES = "notes-app-data";const LS_SELECTED = "notes-app-selected";function loadNotes(): Note[] {  try {    const saved = localStorage.getItem(LS_NOTES);    if (saved) return JSON.parse(saved) as Note[];  } catch {}  return INITIAL_NOTES;}function NoteRow({  note,  selected,  onSelect,}: {  note: Note;  selected: string;  onSelect: (id: string) => void;}) {  const isSelected = note.id === selected;  return (    <div      onClick={() => onSelect(note.id)}      style={{        padding: "9px 14px",        borderRadius: "8px",        margin: "1px 6px",        cursor: "pointer",        background: isSelected ? "rgba(255,204,0,0.22)" : "transparent",        transition: "background 0.15s ease",        display: "flex",        gap: "8px",        alignItems: "flex-start",        userSelect: "none",      }}      onMouseEnter={(e) => {        if (!isSelected)          (e.currentTarget as HTMLElement).style.background =            "rgba(0,0,0,0.04)";      }}      onMouseLeave={(e) => {        if (!isSelected)          (e.currentTarget as HTMLElement).style.background = "transparent";      }}    >      {note.color && (        <div          style={{            width: 3,            borderRadius: 2,            background: note.color,            alignSelf: "stretch",            flexShrink: 0,          }}        />      )}      <div style={{ flex: 1, minWidth: 0 }}>        <div          style={{            fontSize: "13px",            fontWeight: 600,            color: "#1c1c1e",            overflow: "hidden",            textOverflow: "ellipsis",            whiteSpace: "nowrap",          }}        >          {note.title || "Untitled"}        </div>        <div style={{ display: "flex", gap: "6px", marginTop: "1px" }}>          <span            style={{              fontSize: "11px",              color: "rgba(0,0,0,0.4)",              flexShrink: 0,            }}          >            {note.date}          </span>          <span            style={{              fontSize: "11px",              color: "rgba(0,0,0,0.35)",              overflow: "hidden",              textOverflow: "ellipsis",              whiteSpace: "nowrap",            }}          >            {note.body.slice(0, 28) || "No additional text"}          </span>        </div>      </div>    </div>  );}function GroupHeader({ label }: { label: string }) {  return (    <div      style={{        fontSize: "12px",        fontWeight: 700,        color: "rgba(0,0,0,0.4)",        padding: "8px 14px 3px",        letterSpacing: "0.01em",      }}    >      {label}    </div>  );}function TBtn({  title,  onClick,  children,  style,}: {  title: string;  onClick?: () => void;  children: React.ReactNode;  style?: React.CSSProperties;}) {  return (    <button      title={title}      onClick={onClick}      style={{        background: "none",        border: "none",        cursor: "pointer",        padding: "4px 6px",        borderRadius: "6px",        opacity: 0.55,        display: "flex",        alignItems: "center",        justifyContent: "center",        fontSize: "13px",        transition: "opacity 0.12s, background 0.12s",        ...style,      }}      onMouseEnter={(e) => {        (e.currentTarget as HTMLElement).style.opacity = "1";        (e.currentTarget as HTMLElement).style.background = "rgba(0,0,0,0.06)";      }}      onMouseLeave={(e) => {        (e.currentTarget as HTMLElement).style.opacity = (          style?.opacity ?? 0.55        ).toString();        (e.currentTarget as HTMLElement).style.background = "none";      }}    >      {children}    </button>  );}export default function Notes() {  const { winWidth } = useWindowSize();  const isMobile = winWidth < 768;  const [notes, setNotes] = useState<Note[]>(loadNotes);  const [mobileView, setMobileView] = useState<"list" | "editor">("list");  const [selected, setSelected] = useState<string>(() => {    try {      const saved = localStorage.getItem(LS_SELECTED);      const loaded = loadNotes();      if (saved && loaded.find((n) => n.id === saved)) return saved;      return loaded[0]?.id ?? "";    } catch {      return loadNotes()[0]?.id ?? "";    }  });  const [search, setSearch] = useState("");  const [activeSection, setActiveSection] = useState<"notes" | "shared">(    "notes",  );  const textareaRef = useRef<HTMLTextAreaElement>(null);  const titleRef = useRef<HTMLInputElement>(null);  useEffect(() => {    try {      localStorage.setItem(LS_NOTES, JSON.stringify(notes));    } catch {}  }, [notes]);  useEffect(() => {    try {      localStorage.setItem(LS_SELECTED, selected);    } catch {}  }, [selected]);  const activeNote = notes.find((n) => n.id === selected);  const filtered = search.trim()    ? notes.filter(        (n) =>          n.title.toLowerCase().includes(search.toLowerCase()) ||          n.body.toLowerCase().includes(search.toLowerCase()),      )    : notes;  const pinned = filtered.filter((n) => n.pinned);  const regular = filtered.filter((n) => !n.pinned);  const groups = groupNotes(regular);  const updateNote = (field: "title" | "body", val: string) => {    setNotes((prev) =>      prev.map((n) => (n.id === selected ? { ...n, [field]: val } : n)),    );  };  const newNote = () => {    const id = Date.now().toString();    const note: Note = {      id,      title: "New Note",      body: "",      date: "Today",      dateISO: todayISO,    };    setNotes((prev) => [note, ...prev]);    setSelected(id);    if (isMobile) setMobileView("editor");    setTimeout(() => {      titleRef.current?.focus();      titleRef.current?.select();    }, 50);  };  const deleteNote = (id: string) => {    const remaining = notes.filter((n) => n.id !== id);    setNotes(remaining);    if (selected === id) {      setSelected(remaining[0]?.id ?? "");      if (isMobile) setMobileView("list");    }  };  return (    <div      style={{        display: "flex",        height: "100%",        background: "rgba(250,250,248,0.99)",        borderRadius: "0 0 14px 14px",        overflow: "hidden",      }}    >      {!isMobile && (        <div          style={{            width: "180px",            flexShrink: 0,            borderRight: "0.5px solid rgba(0,0,0,0.1)",            background: "rgba(244,242,236,0.99)",            display: "flex",            flexDirection: "column",            paddingTop: "8px",          }}        >          <div            style={{              padding: "6px 12px 8px",              borderBottom: "0.5px solid rgba(0,0,0,0.07)",              display: "flex",              alignItems: "center",              justifyContent: "space-between",            }}          >            <span style={{ fontSize: "13px", fontWeight: 600, color: "#1c1c1e" }}>              Notes            </span>          </div>          <div style={{ padding: "10px 0 4px" }}>            <div              style={{                fontSize: "10px",                fontWeight: 700,                color: "rgba(0,0,0,0.35)",                textTransform: "uppercase",                letterSpacing: "0.5px",                padding: "0 12px 4px",              }}            >              iCloud            </div>            {(["notes", "shared"] as const).map((sec) => (              <button                key={sec}                onClick={() => setActiveSection(sec)}                style={{                  display: "flex",                  alignItems: "center",                  justifyContent: "space-between",                  padding: "5px 12px",                  width: "calc(100% - 8px)",                  background:                    activeSection === sec                      ? "rgba(0,122,255,0.12)"                      : "transparent",                  border: "none",                  borderRadius: "6px",                  margin: "0 4px",                  cursor: "pointer",                }}              >                <div                  style={{ display: "flex", alignItems: "center", gap: "6px" }}                >                  <span                    style={{                      fontSize: "13px",                      color: sec === "notes" ? "#007AFF" : "rgba(0,0,0,0.45)",                    }}                  >                    {sec === "notes" ? "📁" : "👤"}                  </span>                  <span                    style={{                      fontSize: "12px",                      fontWeight: activeSection === sec ? 600 : 400,                      color: activeSection === sec ? "#007AFF" : "#1c1c1e",                    }}                  >                    {sec === "notes" ? "Notes" : "Shared"}                  </span>                </div>                <span                  style={{                    fontSize: "11px",                    color: "rgba(0,0,0,0.35)",                    background: "rgba(0,0,0,0.07)",                    borderRadius: "8px",                    padding: "1px 6px",                  }}                >                  {sec === "notes" ? notes.length : 0}                </span>              </button>            ))}          </div>          <div            style={{              padding: "8px 12px 4px",              borderTop: "0.5px solid rgba(0,0,0,0.06)",            }}          >            <div              style={{                fontSize: "10px",                fontWeight: 700,                color: "rgba(0,0,0,0.35)",                textTransform: "uppercase",                letterSpacing: "0.5px",                marginBottom: "6px",              }}            >              Tags            </div>            <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>              {["All Tags", "#notes"].map((tag) => (                <span                  key={tag}                  style={{                    background: "rgba(0,0,0,0.07)",                    borderRadius: "12px",                    padding: "3px 9px",                    fontSize: "11px",                    color: "#1c1c1e",                    cursor: "default",                    userSelect: "none",                  }}                >                  {tag}                </span>              ))}            </div>          </div>        </div>      )}      {(!isMobile || mobileView === "list") && (        <div          style={{            width: isMobile ? "100%" : "220px",            flexShrink: 0,            borderRight: isMobile ? "none" : "0.5px solid rgba(0,0,0,0.1)",            background: "rgba(248,246,240,0.99)",            display: "flex",            flexDirection: "column",          }}        >          <div            style={{              padding: "8px 10px",              borderBottom: "0.5px solid rgba(0,0,0,0.08)",              display: "flex",              gap: "6px",              alignItems: "center",            }}          >            <div              style={{                flex: 1,                display: "flex",                alignItems: "center",                gap: "5px",                background: "rgba(0,0,0,0.07)",                borderRadius: "7px",                padding: "4px 8px",              }}            >              <span style={{ fontSize: "11px", opacity: 0.5 }}>🔍</span>              <input                placeholder="Search"                value={search}                onChange={(e) => setSearch(e.target.value)}                style={{                  background: "none",                  border: "none",                  outline: "none",                  fontSize: "12px",                  width: "100%",                  color: "#1c1c1e",                }}              />            </div>            <button              onClick={newNote}              title="New Note"              style={{                background: "rgba(255,204,0,0.3)",                border: "none",                borderRadius: "7px",                width: "28px",                height: "28px",                cursor: "pointer",                display: "flex",                alignItems: "center",                justifyContent: "center",                flexShrink: 0,                fontSize: "18px",                lineHeight: 1,                color: "#886800",              }}            >              +            </button>          </div>          <div style={{ flex: 1, overflowY: "auto", paddingTop: "4px" }}>            {pinned.length > 0 && (              <>                <GroupHeader label="Pinned" />                {pinned.map((n) => (                  <NoteRow                    key={n.id}                    note={n}                    selected={selected}                    onSelect={(id) => {                      setSelected(id);                      if (isMobile) setMobileView("editor");                    }}                  />                ))}              </>            )}            {groups.map(({ bucket, notes: gNotes }) => (              <div key={bucket}>                <GroupHeader label={bucket} />                {gNotes.map((n) => (                  <NoteRow                    key={n.id}                    note={n}                    selected={selected}                    onSelect={(id) => {                      setSelected(id);                      if (isMobile) setMobileView("editor");                    }}                  />                ))}              </div>            ))}          </div>        </div>      )}      {(!isMobile || mobileView === "editor") && (        activeNote ? (          <div            style={{              flex: 1,              display: "flex",              flexDirection: "column",              overflow: "hidden",              width: isMobile ? "100%" : "auto",            }}          >            <div              style={{                padding: "6px 12px",                borderBottom: "0.5px solid rgba(0,0,0,0.08)",                display: "flex",                alignItems: "center",                gap: "6px",                background: "rgba(250,250,248,0.99)",              }}            >              {isMobile && (                <button                  onClick={() => setMobileView("list")}                  style={{                    background: "none",                    border: "none",                    color: "#007AFF",                    fontSize: "13px",                    fontWeight: 600,                    cursor: "pointer",                    padding: "2px 0",                  }}                >                  ← Notes                </button>              )}              <div style={{ flex: 1 }} />              <TBtn                title="Download as .txt"                onClick={() => downloadNote(activeNote)}                style={{                  opacity: 0.7,                  color: "#007AFF",                  fontWeight: 500,                  fontSize: "12px",                  padding: "4px 8px",                }}              >                📥 .txt              </TBtn>              <TBtn                title="Delete note"                onClick={() => deleteNote(activeNote.id)}                style={{ opacity: 0.4 }}              >                ❌️              </TBtn>            </div>            <div              style={{                fontSize: "11px",                color: "rgba(0,0,0,0.4)",                padding: "10px 20px 0",                textAlign: "center",              }}            >              {activeNote.dateISO ?? activeNote.date}            </div>            <input              ref={titleRef}              value={activeNote.title}              onChange={(e) => updateNote("title", e.target.value)}              style={{                border: "none",                outline: "none",                fontSize: "20px",                fontWeight: 700,                color: "#1c1c1e",                padding: "8px 20px 4px",                background: "transparent",                width: "100%",                fontFamily: "inherit",              }}            />            <textarea              ref={textareaRef}              value={activeNote.body}              onChange={(e) => updateNote("body", e.target.value)}              style={{                flex: 1,                border: "none",                outline: "none",                resize: "none",                fontSize: "14px",                lineHeight: "1.6",                color: "#1c1c1e",                padding: "0 20px 20px",                background: "transparent",                fontFamily: "inherit",              }}            />          </div>        ) : (          <div            style={{              flex: 1,              display: "flex",              alignItems: "center",              justifyContent: "center",              color: "rgba(0,0,0,0.3)",              fontSize: "14px",            }}          >            Select or create a note          </div>        )      )}    </div>  );}
