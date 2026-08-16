@@ -42,7 +42,7 @@ const apps: AppsData[] = [
   // },
   {
     id: "system-settings",
-    title: "System Settings",
+    title: "Settings",
     desktop: true,
     width: 860,
     height: 540,
